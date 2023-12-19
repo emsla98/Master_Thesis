@@ -22,47 +22,181 @@ from tqdm import tqdm
 
 
 # RMSE function:
-def rmse(y_true, y_pred, axis=None):
+def rmse(y_true, y_pred, axis=None, weights=None):
 
     if axis is None:
-        ret = np.sqrt(np.mean((y_true - y_pred)**2))
+        ret = np.sqrt(np.average(((y_true - y_pred)**2).astype(float), weights=weights))
 
     if axis == 0:
-        ret = np.sqrt(np.mean((y_true - y_pred)**2, axis=0))
+        ret = np.sqrt(np.average(((y_true - y_pred)**2).astype(float), axis=0, weights=weights))
 
     if axis == 1:
-        ret = np.sqrt(np.mean((y_true - y_pred)**2, axis=1))
+        ret = np.sqrt(np.average(((y_true - y_pred)**2).astype(float), axis=1, weights=weights))
+    return ret
+
+# ME function:
+def me(y_true, y_pred, axis=None, weights=None):
+
+    if axis is None:
+        ret = np.average(((y_true - y_pred)**2).astype(float), weights=weights)
+
+    if axis == 0:
+        ret = np.average(((y_true - y_pred)**2).astype(float), axis=0, weights=weights)
+        
+    if axis == 1:
+        ret = np.average(((y_true - y_pred)**2).astype(float), axis=1, weights=weights)
 
     return ret
 
-# MAPE function:
-def mae(y_true, y_pred, axis=None):
+# MinAE function:
+def minae(y_true, y_pred, axis=None, weights=None):
 
     if axis is None:
-        ret = np.mean(np.abs((y_true - y_pred)))
+        ret = np.min(np.abs((y_true - y_pred)))
 
     if axis == 0:
-        ret = np.mean(np.abs((y_true - y_pred)), axis=0)
+        ret = np.min(np.abs((y_true - y_pred)), axis=0)
 
     if axis == 1:
-        ret = np.mean(np.abs((y_true - y_pred)), axis=1)
+        ret = np.min(np.abs((y_true - y_pred)), axis=1)
 
     return ret
 
-# MAPE function:
-def mape(y_true, y_pred, axis=None):
+# MAE function:
+def mae(y_true, y_pred, axis=None, weights=None):
 
     if axis is None:
-        ret = np.mean(np.abs((y_true - y_pred) / y_true))
+        ret = np.average(np.abs((y_true - y_pred)), weights=weights)
 
     if axis == 0:
-        ret = np.mean(np.abs((y_true - y_pred) / y_true), axis=0)
+        ret = np.average(np.abs((y_true - y_pred)), axis=0, weights=weights)
 
     if axis == 1:
-        ret = np.mean(np.abs((y_true - y_pred) / y_true), axis=1)
+        ret = np.average(np.abs((y_true - y_pred)), axis=1, weights=weights)
 
     return ret
 
+# MaxAE function:
+def maxae(y_true, y_pred, axis=None, weights=None):
+
+    if axis is None:
+        ret = np.max(np.abs((y_true - y_pred)))
+
+    if axis == 0:
+        ret = np.max(np.abs((y_true - y_pred)), axis=0)
+
+    if axis == 1:
+        ret = np.max(np.abs((y_true - y_pred)), axis=1)
+
+    return ret
+
+
+# Evaluate function:
+def compute_metric(y_true_df, y_pred_dict, kwargs):
+    """
+    Function for computing a given metric between two datasets.
+
+    ----------
+    Parameters:
+    -----------
+    y_true_df : pd.DataFrame
+        DataFrame of true values.
+    y_pred_dict : dict
+        Dictionary of predicted values.
+    kwargs : dict
+        Dictionary of keyword arguments:
+            metric : "rmse", "me", "mae", "minae", "maxae"
+                Metric to compute.
+            axis : "time", "space"
+                Axis to compute metric over.
+            weights: 
+                Array of mesh element areas. 
+            neg: bool
+                Whether to return negative metric.
+    """
+
+    # Unpack kwargs:
+    metric = kwargs["metric"]
+    axis = kwargs["axis"]
+    weights = kwargs["weights"]
+    neg = kwargs["neg"]
+
+    # Check if metric is valid:
+    if metric not in ["rmse", "me", "mae", "minae", "maxae"]:
+        raise ValueError("Invalid metric. Options: 'rmse', 'me', 'mae', 'minae', 'maxae'.")
+    
+    # Check if axis is valid:
+    if axis not in ["time", "space"]:
+        raise ValueError("Invalid axis. Options: 'time', 'space'.")
+    
+    # Convert axis to int:
+    if axis == "time":
+        axis = 1
+    
+    if axis == "space":
+        axis = 0
+
+    # Convert y_true_df to dict:
+    y_true_dict = {}
+
+    for key in y_pred_dict.keys():
+        
+        # Filter data columns:
+        data_tmp = y_true_df.filter(regex=f"^{key}")  # Filter data
+        
+        # Remove surplus rows: (Observations)
+        data_tmp = data_tmp.loc[y_pred_dict[key].index] 
+        y_true_dict[key] = data_tmp
+    
+    # Initialize error:
+    error = []
+
+    # Loop over all keys:
+    for key in y_true_dict.keys():
+
+        # Retrieve true and predicted values:
+        y_true = y_true_dict[key]
+        y_pred = y_pred_dict[key]
+        
+
+        if (y_true.isna().sum().sum()) > 0:
+            print("NaNs present in y_true")
+            
+        if np.sum(y_pred.isna().sum().sum()) > 0:
+            print("NaNs present in y_pred")
+        
+        # Compute metric:
+        if metric == "rmse":
+            ret = rmse(y_true, y_pred, axis=axis, weights=weights)
+        
+        if metric == "me":
+            ret = me(y_true, y_pred, axis=axis, weights=weights)
+        
+        if metric == "mae":
+            ret = mae(y_true, y_pred, axis=axis, weights=weights)
+        
+        if metric == "minae":
+            ret = minae(y_true, y_pred, axis=axis, weights=weights)
+        
+        if metric == "maxae":
+            ret = maxae(y_true, y_pred, axis=axis, weights=weights)
+
+        if neg:
+            ret = -ret
+
+        # Add to error:
+        error.append(ret.mean())
+
+    # Return average error:
+    return np.array(error).mean()
+
+
+# Retrieve data format:
+def get_mikeio_format():
+
+    path = "../../Data/DHI_yr_sim/Area.dfsu"
+
+    return mikeio.read(path, time=0, items=0)[0]
 
 # Plot function:
 def plot(
@@ -190,6 +324,85 @@ def animate_plot(
 
     return ani
 
+# Animation function:
+def animate_plot2(
+        df_true=None,       # Original data 
+        df_pred=None,       # Reconstructed data
+        frame=0,            # Starting frame
+        n_frames=1,         # Number of frames to animate           
+        extra=""            # Title of the plot
+        ):
+
+    fig, (ax1, ax2, ax3) = plt.subplots(figsize=(12, 8), ncols=3, )
+    
+    img_data_true = get_mikeio_format()
+    img_data_pred = get_mikeio_format()
+    img_data_diff = get_mikeio_format()
+    
+    add_cbar = True
+    
+    cbar_max = np.max(np.abs(df_true.values))
+    cbar_min = -cbar_max
+    
+    def update(*args):
+        
+        ax1.clear(); ax2.clear(); ax3.clear()
+
+        global self, frame, add_cbar
+        global cbar_min, cbar_max, cbar_diff_min, cbar_diff_max
+
+        # Set super title:
+        fig.suptitle(f"Comparison of frame {frame}. \
+                    Reconstruction from"+extra)
+        
+        # Plot original data:
+        img_data_true.values[:] = df_true.values[frame, :]
+        
+        img_data_true.plot(ax=ax1, 
+                      vmin=cbar_min, vmax=cbar_max, 
+                      add_colorbar=add_cbar)
+        
+        ax1.set_title("Original data")
+
+        # Plot reconstructed data:
+        img_data_pred.values[:] = df_pred.values[frame, :]
+        
+        img_data_pred.plot(ax=ax2, 
+                      vmin=cbar_min, vmax=cbar_max,
+                      add_colorbar=add_cbar)
+        
+        ax2.set_title("Reconstructed data")
+
+        rmse_val = rmse(img_data_true.values, img_data_pred.values)
+
+        # Plot difference:
+        img_data_diff.values[:] = df_true.values[frame, :] - df_pred.values[frame, :]
+        
+        img_data_diff.plot(ax=ax3, 
+                      vmin=cbar_diff_min, vmax=cbar_diff_max, 
+                      cmap="seismic", add_colorbar=add_cbar)
+        
+        ax3.set_title(f"Difference. RMSE: {rmse_val:.5f}")
+
+        # Increment frame:
+        frame += 1
+
+        # Disable colorbar after first frame:
+        add_cbar = False
+
+        return ax1, ax2, ax3,
+
+    # Animate:
+    ani = animation.FuncAnimation(fig, update, interval=500,
+                                frames=tqdm(range(n_frames)))
+
+    plt.close()
+    plt.show()
+
+    return ani
+
+
+
 # Temporal plot function:
 def plot_temporal_samples(samples):
     """
@@ -305,58 +518,6 @@ def equitemporal_sampling(
             recon_errs[i, j] = error
 
     return pcas, scalers, recon_errs
-
-# Super class for models:
-class myModels():
-    
-    def __init__(self):
-        pass
-    
-    # Templates:
-    class ModelTemplate:
-        """
-        Ensures that the methods fit, predict, and fit_predict are 
-        instantiated for all classes based on this template.
-        """
-
-        def fit(self, X, y=None):
-            raise NotImplementedError("fit method must be implemented in subclass")
-
-        def predict(self, X):
-            raise NotImplementedError("predict method must be implemented in subclass")
-
-        def fit_predict(self, X, y=None):
-            self.fit(X, y)
-            return self.predict(X)
-        
-    class IPCA(ModelTemplate):
-
-        def __init__(self, n_components=None):
-            self.n_components = n_components
-            self.model = IncrementalPCA(n_components=self.n_components,
-                                        batch_size=self.n_components)
-
-        def fit(self, X, y=None):
-            self.model.fit(X, y)
-            return self
-
-        def predict(self, X):
-            X = self.model.transform(X)
-            return self.model.inverse_transform(X)
-        
-    class PCA(ModelTemplate):
-        
-        def __init__(self, n_components=None):
-            self.n_components = n_components
-            self.model = PCA(n_components=self.n_components)
-
-        def fit(self, X, y=None):
-            self.model.fit(X, y)
-            return self
-
-        def predict(self, X):
-            X = self.model.transform(X)
-            return self.model.inverse_transform(X)
 
 
 

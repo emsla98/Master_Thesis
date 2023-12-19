@@ -1,5 +1,7 @@
 from sklearn import preprocessing, base, decomposition, linear_model
 
+from copy import deepcopy
+
 import pandas as pd
 import numpy as np
 
@@ -158,7 +160,8 @@ class Storage:
                 raise AssertionError("The chosen regressor was not found")
         
         return reg
-    
+        
+
 class MyModels:
 
     def __init__(self, df, scaler, latent_space):
@@ -243,6 +246,7 @@ class MyModels:
         Storage.latent_spaces = latent_spaces
         
         Storage.name = name
+        Storage.name_set = "init"
 
         print("Init was run.")
 
@@ -262,6 +266,7 @@ class MyModels:
             """
             raise NotImplementedError("Subclasses must implement the 'fit' method.")
 
+
         def predict(self, X=None, y=None):
             """
             Placeholder for making predictions.
@@ -274,9 +279,264 @@ class MyModels:
             """
             raise NotImplementedError("Subclasses must implement the 'predict' method.")
  
+
         def plot_errors(self, metric):
 
             pass
+
+
+        def compute_errors(self, keys):
+
+            # Compute error metrics:
+            self.rmses = {}
+            self.rmse_mu = {}
+            self.rmse_sd = {}
+
+            self.maes = {}
+            self.mae_mu = {}
+            self.mae_sd = {}
+
+            self.mapes = {}
+            self.mape_mu = {}
+            self.mape_sd = {}
+
+            for key in keys:
+                data = self.output_data[key]
+                pred = self.output_preds[key]
+
+                rmse = mf.rmse(data, pred, axis=0)
+                mae = mf.mae(data, pred, axis=0)
+                mape = mf.mape(data, pred, axis=0)
+                
+                self.rmse_mu[key] = rmse.mean()
+                self.mae_mu[key] = mae.mean()
+                self.mape_mu[key] = mape.mean()
+
+                self.rmse_sd[key] = rmse.std()
+                self.mae_sd[key] = mae.std()
+                self.mape_sd[key] = mape.std()
+
+                self.rmses[key] = rmse
+                self.maes[key] = mae
+                self.mapes[key] = mape
+
+
+    class ReconModel(Template):
+        """
+        This is a reconstruction model that reconstructs the input and output data using scaler and latent space if available.
+        """
+        
+        def __init__(self, inputs, latent_dim=1):
+            """
+            Args:
+                inputs: List of variables.
+                outputs: List of variables.
+                latent_dim: Number of latent dimensions to use.
+            """
+
+            # Object initialization:
+            self.inputs = inputs
+            self.outputs = inputs
+            self.latent_dim = latent_dim
+
+            # Get input data:
+            if inputs is not None:
+                self.input_data = Storage.copy_dict_pd(dict_in=Storage.data,
+                                                       keys=inputs)
+                
+                self.output_data = Storage.copy_dict_pd(dict_in=Storage.data,
+                                                        keys=inputs)
+
+            name = Storage.name
+
+            self.latent_spaces = deepcopy(Storage.latent_spaces)
+            self.scalers = deepcopy(Storage.scalers)
+
+            if self.latent_spaces is not None:
+                name = name[:-2]
+                name += f"({self.latent_dim})-Recon" 
+
+            # Set dimensions of latent spaces:
+            if latent_dim is not None:
+
+                if latent_dim > Storage.max_dim:
+                    raise AssertionError("Too many latent dimensions. Should be in interval [1, {Storage.max_dim}]")
+                
+                for key, obj in self.latent_spaces.items():
+                    obj.means_ = obj.mean_[:latent_dim]
+                    obj.components_ = obj.components_[:latent_dim, :]
+
+
+            print("RM.init:", self.latent_spaces["z"].components_.shape)
+
+            self.name = name
+            self.input_cols_dict = None
+            self.output_cols_dict = None
+
+        def scale_n_proj(self, direction, X=None, y=None):
+
+            # Check if scaling is needed:
+            if self.scalers is not None:
+                scalers = self.scalers
+            
+            else:
+                scalers = None
+
+            # Check if projection is needed:
+            if self.latent_spaces is not None:
+                latent_spaces = self.latent_spaces
+            else:
+                latent_spaces = None
+
+            # Initialize dictionaries if not already existing:
+            if self.input_cols_dict is None:
+                self.input_cols_dict = {}
+
+            if self.output_cols_dict is None:
+                self.output_cols_dict = {}
+
+            # Check if input data is present:
+            if X is not None:
+                
+                # Copy input data:
+                X2 = X.copy()
+
+                # Scale and transform each input:
+                for key in X2:
+                    
+                    X_index = X2[key].index
+
+                    # Forward method:
+                    if direction == "forward":
+
+                        # Get column names from input data:
+                        cols = X2[key].columns
+                    
+                        # Store column names:
+                        self.input_cols_dict[key] = cols
+
+                        # Check if scaling is needed:
+                        if scalers is not None:
+                            X2[key] = pd.DataFrame(
+                                            scalers[key].transform(X2[key]),
+                                            columns=cols)
+
+                        # Check if projection is needed:
+                        if latent_spaces is not None:
+                            X2[key] = pd.DataFrame(
+                                        latent_spaces[key].transform(X2[key]),
+                                        columns=cols[:self.latent_dim])
+
+                    # Inverse method:
+                    if direction == "inverse":
+                        
+                        # Get column names from stored data:
+                        cols = self.input_cols_dict[key]
+
+                        # Check if projection is needed:
+                        if latent_spaces is not None:
+                            X2[key] = pd.DataFrame(
+                                        latent_spaces[key].inverse_transform(X2[key]),
+                                        columns=cols)
+
+                        # Check if scaling is needed:
+                        if scalers is not None:
+                            X2[key] = pd.DataFrame(
+                                        scalers[key].inverse_transform(X2[key]),
+                                        columns=cols)
+
+                    # Set index:
+                    X2[key].index = X_index
+
+            else:
+                X2 = None
+
+
+            # Check if output data is present:
+            if y is not None:
+                
+                y2 = y.copy()
+
+                # Scale and transform each output:
+                for key in y2:
+                    
+                    y_index = y2[key].index
+
+                    # Forward method:
+                    if direction == "forward":
+
+                        # Get column names:
+                        cols = y2[key].columns
+
+                        # Store column names:
+                        self.output_cols_dict[key] = cols
+
+                        # Check if scaling is needed:
+                        if scalers is not None:
+                            y_tmp = scalers[key].transform(y2[key])
+                            y2[key] = pd.DataFrame(y_tmp, columns=cols)
+                            
+                        # Check if projection is needed:
+                        if latent_spaces is not None:
+                            y_tmp = latent_spaces[key].transform(y2[key])
+                            y2[key] = pd.DataFrame(y_tmp, 
+                                        columns=cols[:self.latent_dim])
+
+                    # Inverse method:
+                    if direction == "inverse":
+                        
+                        # Get column names from stored data:
+                        cols = self.output_cols_dict[key]
+
+                        # Check if projection is needed:
+                        if latent_spaces is not None:
+                            y2[key] = pd.DataFrame(
+                                        latent_spaces[key].inverse_transform(y2[key]),
+                                        columns=cols)
+
+                        # Check if scaling is needed:
+                        if scalers is not None:
+                            y2[key] = pd.DataFrame(
+                                        scalers[key].inverse_transform(y2[key]),
+                                        columns=cols)
+
+                    # Set index:
+                    y2[key].index = y_index
+
+            else:
+                y2 = None
+            
+            return X2, y2
+
+
+        def fit(self, X=None, y=None):
+
+            return self
+
+
+        def predict(self, X=None, y=None):
+                
+            # Check if input data is present:
+            if X is None:
+                X = self.input_data.copy()
+            
+            # Check if output data is present:
+            if y is None:
+                y = self.output_data.copy()
+            
+            # Scale and project output:
+            _, y1 = self.scale_n_proj("forward", X=None, y=y)
+
+            # Rescale and project output:
+            _, y2 = self.scale_n_proj("inverse", X=None, y=y1)
+
+            # Store output:
+            self.output_preds = y2
+
+            # Compute error metrics:
+            self.compute_errors(self.outputs)
+
+            return
 
 
     class BaselineModel(Template):
@@ -285,7 +545,7 @@ class MyModels:
         mean of the training data.
         """
 
-        def __init__(self, inputs, model_type="Baseline", train_frac=0.25):
+        def __init__(self, inputs, model_type, train_frac=0.25):
             """
             Args:
                 inputs: List of variables.
@@ -295,6 +555,7 @@ class MyModels:
 
             # Object initialization:
             self.inputs = inputs
+            self.outputs = inputs
             self.train_frac = train_frac
             self.model_type = model_type
 
@@ -312,6 +573,8 @@ class MyModels:
                 
                 self.output_data = Storage.copy_dict_pd(dict_in=Storage.data,
                                                         keys=inputs)
+
+            self.name_set = Storage.name_set
 
 
         def fit(self, X=None, y=None):
@@ -348,8 +611,6 @@ class MyModels:
 
                     # Get mean value:
                     self.means[key] = y_train.mean(axis=0)
-
-            self.name += f", n_train: {self.n_train}"
 
             return self
 
@@ -391,19 +652,21 @@ class MyModels:
                 
                 self.output_preds[key] = preds
 
-
-            self.name += f", n_test: {self.n_test}"
+            # Compute error metrics:
+            self.compute_errors(self.outputs)
 
             return
 
 
-
     class RegressionModel(Template):
-        
+        """
+        This is a regression model that predicts the
+        output variables using the input variables.
+        """
 
         def __init__(self, regressor=None, inputs=None, outputs=None,
                      wind=False, boundary=False,
-                     state_lag=1, extra_lag=0, extra_lead=1,
+                     state_lag=1, extra_lag=0, extra_lead=0,
                      latent_dim=1, train_frac=0, test_frac=0):
            
            # Object initialization:
@@ -421,8 +684,8 @@ class MyModels:
                 self.test_frac = 1-train_frac
             self.test_frac = test_frac
 
-            self.scalers = Storage.scalers
-            latent_spaces = Storage.latent_spaces
+            self.scalers = deepcopy(Storage.scalers)
+            latent_spaces = deepcopy(Storage.latent_spaces)
 
             # Set dimensions of latent spaces:
             if latent_dim is not None:
@@ -478,11 +741,13 @@ class MyModels:
             self.input_cols_dict = None
             self.output_cols_dict = None
 
+            self.name_set = Storage.name_set
+
             # Naming scheme:
             if 1:
                 name = Storage.name
 
-                if self.scalers is not None:
+                if self.latent_spaces is not None:
                     name = name[:-2]
                     name += f"({self.latent_dim}), "
 
@@ -492,11 +757,13 @@ class MyModels:
                 if inputs is not None:
                     in_str = ", ".join(inputs)
                 
-                if boundary is True:
-                    in_str += ", bcn, bcs"
+                if extra_lag > 0 or extra_lead > 0:
 
-                if wind is True:
-                    in_str += ", wu, wv"
+                    if boundary is True:
+                        in_str += ", bcn, bcs"
+
+                    if wind is True:
+                        in_str += ", wu, wv"
 
                 name += f"[{in_str}])->"
 
@@ -515,9 +782,9 @@ class MyModels:
                         name += f", extra_lead: {extra_lead}"
         
                 self.name = name
+                self.name_set = "init"
 
             return
-
 
 
         def scale_n_proj(self, direction, X=None, y=None):
@@ -799,10 +1066,9 @@ class MyModels:
 
             self.X_train = X_train
             self.y_train = y_train
-
-            self.name += f", n_train: {n_train}"
-
+            
             return self
+
 
         def predict(self, X=None, y=None, n_test=None):
             
@@ -990,10 +1256,12 @@ class MyModels:
 
             
             _, self.output_preds = self.scale_n_proj("inverse", y=output_preds)
+            
+            # Compute error metrics:
+            self.compute_errors(self.outputs)
+            
 
-            self.name += f", n_test: {n_test}"
-
-            return 
+            return
 
 
             

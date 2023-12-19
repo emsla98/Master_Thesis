@@ -1,964 +1,13 @@
+from sklearn import preprocessing, base, decomposition, linear_model, ensemble
+from xgboost import XGBRegressor
 
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA, IncrementalPCA
-from sklearn.linear_model import LinearRegression, Ridge
-
-import matplotlib.pyplot as plt
-
-from tqdm import tqdm
-
-def extract_features(df):
-    
-    # Surface elevation, U- and V-velocity:
-    z_data = df.filter(regex="z_").values
-    u_data = df.filter(regex="^u_").values
-    v_data = df.filter(regex="^v_").values
-    
-    # North and south BC data:
-    bcn_data = df.filter(regex="bcn_").values
-    bcs_data = df.filter(regex="bcs_").values
-    
-    # U- and V- wind velocity data:
-    wu_data = df.filter(regex="wu_").values
-    wv_data = df.filter(regex="wv_").values
-    
-    data_list = {"z"  :   z_data, "u"  :   u_data, "v" : v_data,
-                 "bcn": bcn_data, "bcs": bcs_data,
-                 "wu" :  wu_data, "wv" :  wv_data}
-    
-    return data_list
-
-
-
-
-# Super class:
-class my_models():
-    
-    def __init__(self):
-        pass
-    
-    # Template for models:
-    class PredictionModel:
-        """
-        Ensures that the methods fit, predict, fit_predict and plot are 
-        instantiated for all classes based on this template.
-        """
-        
-        if 0:
-            def fit(self):
-                raise NotImplementedError("Fit method must be implemented in subclass.")
-
-            def predict(self):
-                raise NotImplementedError("Predict method must be implemented in subclass.")        
-
-            def plot(self):
-                raise NotImplementedError("Plot method must be implemented in subclass.")
-    
-        
-        def plot_errors(self):
-            
-            df_train = self.df_train
-            df_test  = self.df_test
-            model    = self.model
-            
-            xs = range(len(df_train)+len(df_test))
-            x_train = xs[:len(df_train)]
-            x_test = xs[len(df_train):]
-            
-            train_errors = model["train_errors"]
-            test_errors = model["test_errors"]
-            
-            plt.figure(figsize=(7,5), dpi=100)
-            plt.title(f"Errors for model: {model['name']}", 
-                      fontsize=16)
-            
-            plt.plot(x_train, train_errors, color="blue")
-            plt.plot(x_test,  test_errors,  color="red")
-            
-            train_error_avg = train_errors.mean()
-            test_error_avg = test_errors.mean()
-            
-            plt.legend([f"Train: ( $\mu$ = {train_error_avg:.4f} )",
-                        f"Test:  ( $\mu$ = {test_error_avg:.4f} )"],
-                        fontsize=11,
-                        frameon=True, fancybox=True,
-                        shadow=True, framealpha=1, facecolor="lightgrey")
-            
-            plt.xlabel("Time steps", fontsize=14)
-            plt.ylabel("RMSE", fontsize=14)
-            
-            plt.ylim([0,1])
-            
-            plt.show()
-            
-            return
-            
-
-## Model 0:
-    class PCAReconstruction(PredictionModel):
-        """
-        PCAReconstruction: 
-        Projects data into PCA subspace and reconstructs back to original space.
-        """
-        
-        def __init__(self, pca_bs=256, pca_comps=10):
-            
-            self.name = f"PCA-({pca_comps}) Reconstruction"
-            self.pca = IncrementalPCA(batch_size=pca_bs,
-                                      n_components=pca_comps)
-            self.pca_bs = pca_bs
-            
-        def run(self, df_train, df_test):
-
-            self.df_train = df_train
-            self.df_test  = df_test
-
-            # Extract features:
-            train_feats = extract_features(df_train)
-            test_feats = extract_features(df_test)
-
-            # Extract training data:
-            X_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-            y_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-
-            # Extract test data:
-            X_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-            y_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-
-            # PCA and scaler:
-            scaler = StandardScaler().fit(X_train)
-            pca = self.pca
-            pca_bs = self.pca_bs
-            
-            # Scale:
-            X_train_scaled = scaler.transform(X_train)
-            
-            # Fit PCA:
-            for i in tqdm(range(0, len(X_train_scaled), pca_bs)[:-2]):
-                
-                j = i + pca_bs
-                pca.partial_fit(X_train_scaled[i:j])
-            
-            pca.partial_fit(X_train_scaled[j:])
-             
-            # PCA Transform:
-            X_train_scaled_pca = pca.transform(X_train_scaled)
-            
-            # Reconstruct training data:
-            y_train_scaled_pred = pca.inverse_transform(X_train_scaled_pca)
-            
-            # Rescale training data:
-            y_train_pred = scaler.inverse_transform(y_train_scaled_pred)
-            
-            # Compute training error:
-            train_errors = mf.rmse(y_train, y_train_pred, axis=1)
-            
-            # Predict test data:
-            X_test_scaled = scaler.transform(X_test)
-            
-            # PCA Transform:
-            X_test_scaled_pca = pca.transform(X_test_scaled)
-            
-            # Reconstruct test data:
-            y_test_scaled_pred = pca.inverse_transform(X_test_scaled_pca)
-            
-            # Rescale test data:
-            y_test_pred = scaler.inverse_transform(y_test_scaled_pred)
-            
-            # Compute test error:
-            test_errors = mf.rmse(y_test, y_test_pred, axis=1)
-
-            # Collect data:
-            model = {"y_train_pred" : y_train_pred,
-                     "y_test_pred"  : y_test_pred,
-                     "train_errors" : train_errors,
-                     "test_errors"  : test_errors,
-                     "name"         : self.name}
-
-            self.model = model
-
-            return
-            
-## Model 1:
-    class Baseline(PredictionModel):
-        """
-        Baseline: 
-        Computes mean across all elements and time steps and predicts 
-        the mean for all elements at all time steps.
-        """
-        
-        def __init__(self):
-            self.name = "Baseline"
-            
-        def run(self, df_train, df_test):
-            
-            self.df_train = df_train
-            self.df_test  = df_test
-            
-            # Extract features:
-            train_feats = extract_features(df_train)
-            test_feats = extract_features(df_test)
-
-            # Extract training data:
-            X_train = train_feats["z"]
-            y_train = train_feats["z"]
-
-            # Extract test data:
-            X_test = test_feats["z"]
-            y_test = test_feats["z"]
-
-            # Fit model:
-            mean = X_train.mean()
-
-            # Predict training data:
-            y_train_pred = np.zeros_like(y_train) + mean
-
-            # Compute training error:
-            train_errors = mf.rmse(y_train, y_train_pred, axis=1)
-
-            # Predict test data:
-            y_test_pred = np.zeros_like(y_test) + mean
-
-            # Compute test error:
-            test_errors = mf.rmse(y_test, y_test_pred, axis=1)
-            
-            # Collect data:
-            model = {"y_train_pred" : y_train_pred,
-                     "y_test_pred"  : y_test_pred,
-                     "train_errors" : train_errors,
-                     "test_errors"  : test_errors,
-                     "name"         : self.name}
-
-            self.model = model
-            
-            return
-        
-## Model 2:        
-    class Coordinate_Baseline(PredictionModel):
-        """
-        Coordinate_Baseline: 
-        Computes mean for each element across all time steps and predicts 
-        the element mean for each element at all time steps. 
-        
-        """
-        
-        def __init__(self):
-            self.name = "Coordinate Baseline"
-            
-        def run(self, df_train, df_test):
-            
-            self.df_train = df_train
-            self.df_test  = df_test
-            
-            # Extract features:
-            train_feats = extract_features(df_train)
-            test_feats = extract_features(df_test)
-
-            # Extract training data:
-            X_train = train_feats["z"]
-            y_train = train_feats["z"]
-
-            # Extract test data:
-            X_test = test_feats["z"]
-            y_test = test_feats["z"]
-
-            # Fit model:
-            mean = X_train.mean(axis=0)
-
-            # Predict training data:
-            y_train_pred = np.zeros_like(y_train) + mean
-
-            # Compute training error:
-            train_errors = mf.rmse(y_train, y_train_pred, axis=1)
-
-            # Predict test data:
-            y_test_pred = np.zeros_like(y_test) + mean
-
-            # Compute test error:
-            test_errors = mf.rmse(y_test, y_test_pred, axis=1)
-            
-            # Collect data:
-            model = {"y_train_pred" : y_train_pred,
-                     "y_test_pred"  : y_test_pred,
-                     "train_errors" : train_errors,
-                     "test_errors"  : test_errors,
-                     "name"         : self.name}
-
-            self.model = model
-            
-            return
-
-    
-## Model 5:    
-    class PCA_Regression_Z_BC(PredictionModel):
-        """
-        PCA_Regression_Z_BC: 
-        Compresses the state vector into PCA subspace and adds the raw boundary conditions before
-        computing the least squares linear map between the state [x_(i-1), bc_(i)] and x_(i). 
-        
-        The linear map is used to predict the future state. 
-
-        """
-
-        def __init__(self, pca_bs=256, pca_comps=10):
-            
-            self.name = f"PCA-({pca_comps}) Regression with Z and BCs"
-            self.pca = IncrementalPCA(batch_size=pca_bs,
-                                      n_components=pca_comps)
-            self.pca_bs = pca_bs
-            
-            
-        def run(self, df_train, df_test):
-
-            self.df_train = df_train
-            self.df_test  = df_test
-
-            # Extract features:
-            train_feats = extract_features(df_train)
-            test_feats = extract_features(df_test)
-
-            # Extract training data:
-            X_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-            y_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-
-            # Extract test data:
-            X_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-            y_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-
-            # PCA and scaler:
-            scaler = StandardScaler().fit(X_train)
-            pca = self.pca
-            pca_bs = self.pca_bs
-            
-            # Scale:
-            X_train_scaled = scaler.transform(X_train)
-            
-            # Fit PCA:
-            for i in tqdm(range(0, len(X_train_scaled), pca_bs)[:-2]):
-                
-                j = i + pca_bs
-                pca.partial_fit(X_train_scaled[i:j])
-            
-            pca.partial_fit(X_train_scaled[j:])
-             
-            # PCA Transform:
-            X_train_scaled_pca = pca.transform(X_train_scaled)
-            
-            # Create input and outputs for linear regressor:
-            X_in = np.concatenate([X_train_scaled_pca[:-1],
-                                  np.concatenate([train_feats[i][1:] for i in ["bcn", "bcs"]], axis=1)], axis=1)                    
-            
-            X_out = X_train_scaled_pca[1:]
-            
-            # Create linear regressor:
-            LR = LinearRegression()
-            
-            # Fit linear regressor:
-            LR.fit(X_in, X_out)
-            
-            # Predict training data:
-            y_train_scaled_pca_pred = np.zeros_like(X_train_scaled_pca)
-        
-            # Loop for predicting training data:
-            for i in tqdm(range(len(X_train))):
-                if i == 0:
-                    y_train_scaled_pca_pred[i, :] = X_train_scaled_pca[0, :]
-                else:
-                    X_in = np.concatenate([y_train_scaled_pca_pred[i-1, :],
-                            np.concatenate([train_feats[feat][i,:] for feat in ["bcn", "bcs"]])], 
-                                          ).reshape(1,-1)
-                    
-                    y_train_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-
-            y_train_scaled_pred = pca.inverse_transform(
-                                    y_train_scaled_pca_pred)
-            
-            y_train_pred = scaler.inverse_transform(y_train_scaled_pred)
-            
-            # Compute training error:
-            train_errors = mf.rmse(y_train, y_train_pred, axis=1)
-            
-            # Predict test data:
-            X_test_scaled = scaler.transform(X_test)
-            
-            X_test_scaled_pca = pca.transform(X_test_scaled)
-            
-            y_test_scaled_pca_pred = np.zeros_like(X_test_scaled_pca)
-            
-            # Loop for predicting testing data:
-            for i in tqdm(range(len(X_test))):
-                if i == 0:
-                    X_in = np.concatenate([X_train_scaled_pca[-1],
-                                           np.concatenate([test_feats[feat][0,:] for feat in ["bcn", "bcs"]])
-                                          ]).reshape(1,-1)
-                                      
-                else:
-                    X_in = np.concatenate([y_test_scaled_pca_pred[i-1, :],
-                            np.concatenate([test_feats[feat][i,:] for feat in ["bcn", "bcs"]])
-                                          ]).reshape(1,-1)
-                                        
-                y_test_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-            
-            y_test_scaled_pred = pca.inverse_transform(
-                                   y_test_scaled_pca_pred)
-            
-            y_test_pred = scaler.inverse_transform(y_test_scaled_pred)
-            
-            
-            # Compute test error:
-            test_errors = mf.rmse(y_test, y_test_pred, axis=1)
-
-            # Collect data:
-            model = {"y_train_pred" : y_train_pred,
-                     "y_test_pred"  : y_test_pred,
-                     "train_errors" : train_errors,
-                     "test_errors"  : test_errors,
-                     "name"         : self.name}
-
-            self.model = model
-
-            return
-        
-
-## Model 3:
-    class PCA_Multistep_Regression_Z(PredictionModel):
-        """
-        PCA_Multistep_Regression_Z: 
-        Compresses the state vector into PCA subspace and computes the least squares linear map between 
-        the previous state(s) and future state.
-        
-        The linear map is used to predict the future state. 
-        """
-
-        def __init__(self, pca_bs=256, pca_comps=10, ar=1):
-            
-            self.name = f"PCA-({pca_comps}) Regression with {ar}-previous Z"
-            self.pca = IncrementalPCA(batch_size=pca_bs,
-                                      n_components=pca_comps)
-            self.pca_bs = pca_bs
-            self.ar = ar
-            
-            
-        def run(self, df_train, df_test):
-
-            self.df_train = df_train
-            self.df_test  = df_test
-
-            # Extract features:
-            train_feats = extract_features(df_train)
-            test_feats = extract_features(df_test)
-
-            # Extract training data:
-            X_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-            y_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-
-            # Extract test data:
-            X_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-            y_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-
-            # PCA and scaler:
-            scaler = StandardScaler().fit(X_train)
-            pca = self.pca
-            pca_bs = self.pca_bs
-            ar = self.ar
-            
-            # Scale:
-            X_train_scaled = scaler.transform(X_train)
-            
-            # Fit PCA:
-            for i in tqdm(range(0, len(X_train_scaled), pca_bs)[:-2]):
-                
-                j = i + pca_bs
-                pca.partial_fit(X_train_scaled[i:j])
-            
-            pca.partial_fit(X_train_scaled[j:])
-             
-            # PCA Transform:
-            X_train_scaled_pca = pca.transform(X_train_scaled)
-            
-            # Create input and output:
-            n_in = len(X_train)
-            X_in_arr = []
-            
-            for i in range(ar):
-                X_in_arr.append(X_train_scaled_pca[i:(n_in - ar+i), :])
-            
-            X_in = np.concatenate(X_in_arr, axis=1)
-            
-            X_out = X_train_scaled_pca[ar:, :]
-            
-            
-            # Create linear regressor:
-            LR = LinearRegression()
-            
-            # Fit linear regressor:
-            LR.fit(X_in, X_out)
-            
-            # Predict training data:
-            y_train_scaled_pca_pred = np.zeros_like(X_train_scaled_pca)
-        
-        
-            # Loop for predicting training data:
-            for i in tqdm(range(len(X_train))):
-                
-                # If True: Set the value:
-                if i < ar:
-                    y_train_scaled_pca_pred[i, :] = X_train_scaled_pca[i, :]
-               
-                # If False: Predict the value:
-                else:
-                    X_in_arr = [y_train_scaled_pca_pred[i-ar+j] for j in range(ar)]
-                    X_in = np.concatenate(X_in_arr).reshape(1,-1)
-                    y_train_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-
-            y_train_scaled_pred = pca.inverse_transform(
-                                    y_train_scaled_pca_pred)
-            
-            y_train_pred = scaler.inverse_transform(y_train_scaled_pred)
-            
-            # Compute training error:
-            train_errors = mf.rmse(y_train, y_train_pred, axis=1)
-            
-            # Predict test data:
-            X_test_scaled = scaler.transform(X_test)
-            
-            X_test_scaled_pca = pca.transform(X_test_scaled)
-            
-            y_test_scaled_pca_pred = np.zeros_like(X_test_scaled_pca)
-            
-            
-            # Loop for predicting testing data:
-            for i in tqdm(range(len(X_test))):
-                
-                
-                # If True: We need both X_train and X_test
-                if i < ar:
-                    
-                    X_in_arr = []
-                    
-                    # Loop over preceding steps:
-                    for j in range(ar):
-
-                        k = i-ar+j
-                        
-                        # If True: Use X_train
-                        if k < 0:
-                            X_in_arr.append(X_train_scaled_pca[k])
-                            
-                        # If False: Use y_test_pred
-                        else:
-                            X_in_arr.append(y_test_scaled_pca_pred[k])
-                        
-                # If False: We need only y_test_pred:
-                else:
-                    X_in_arr = [y_test_scaled_pca_pred[i-ar+j] for j in range(ar)]
-        
-                X_in = np.concatenate(X_in_arr).reshape(1,-1)
-                
-                    
-                y_test_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-            
-            y_test_scaled_pred = pca.inverse_transform(
-                                   y_test_scaled_pca_pred)
-            
-            y_test_pred = scaler.inverse_transform(y_test_scaled_pred)
-            
-            
-            # Compute test error:
-            test_errors = mf.rmse(y_test, y_test_pred, axis=1)
-
-            # Collect data:
-            model = {"y_train_pred" : y_train_pred,
-                     "y_test_pred"  : y_test_pred,
-                     "train_errors" : train_errors,
-                     "test_errors"  : test_errors,
-                     "name"         : self.name}
-
-            self.model = model
-
-            return
-
-        
-## Model 4:
-    class PCA_Multistep_Regression_BC(PredictionModel):
-        """
-        PCA_Multistep_Regression_BC: 
-        Compresses the state vector into PCA subspace and
-        computes the least squares linear map between previous BCs and the current state. 
-        
-        The linear map is used to predict the future state. 
-        """
-
-        def __init__(self, pca_bs=256, pca_comps=10, ar=1):
-            
-            self.name = f"PCA-({pca_comps}) Regression with {ar}-previous BCs"
-            self.pca = IncrementalPCA(batch_size=pca_bs,
-                                      n_components=pca_comps)
-            self.pca_bs = pca_bs
-            self.ar = ar
-            
-            
-        def run(self, df_train, df_test):
-
-            self.df_train = df_train
-            self.df_test  = df_test
-
-            # Extract features:
-            train_feats = extract_features(df_train)
-            test_feats = extract_features(df_test)
-
-            # Extract training data:
-            X_train = np.concatenate([train_feats[i] for i in ["bcn", "bcs"]], axis=1)
-            y_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-
-            # Extract test data:
-            X_test = np.concatenate([test_feats[i] for i in ["bcn", "bcs"]], axis=1)
-            y_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-
-            # PCA and scaler:
-            scaler = StandardScaler().fit(y_train)
-            pca = self.pca
-            pca_bs = self.pca_bs
-            ar = self.ar
-            
-            # Scale:
-            y_train_scaled = scaler.transform(y_train)
-            
-            # Fit PCA:
-            for i in tqdm(range(0, len(y_train_scaled), pca_bs)[:-2]):
-                
-                j = i + pca_bs
-                pca.partial_fit(y_train_scaled[i:j])
-            
-            pca.partial_fit(y_train_scaled[j:])
-             
-            # PCA Transform:
-            y_train_scaled_pca = pca.transform(y_train_scaled)
-            
-            # Create input and output:
-            n_in = len(X_train)
-            
-            X_in_arr = []
-            
-            for i in range(ar):
-                X_in_arr.append(X_train[i:(n_in - ar+i), :])
-            
-            X_in = np.concatenate(X_in_arr, axis=1)
-            
-            y_out = y_train_scaled_pca[ar:, :]
-            
-            # Create linear regressor:
-            LR = LinearRegression()
-            
-            # Fit linear regressor:
-            LR.fit(X_in, y_out)
-            
-            # Predict training data:
-            y_train_scaled_pca_pred = np.zeros_like(y_train_scaled_pca)
-        
-            # Loop for predicting training data:
-            for i in tqdm(range(len(X_train))):
-                
-                # If True: Set the value:
-                if i < ar:
-                    y_train_scaled_pca_pred[i, :] = y_train_scaled_pca[i, :]
-               
-                # If False: Predict the value:
-                else:
-                    X_in_arr = [X_train[i-ar+j] for j in range(ar)]
-                    X_in = np.concatenate(X_in_arr).reshape(1,-1)
-                    y_train_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-
-            y_train_scaled_pred = pca.inverse_transform(
-                                    y_train_scaled_pca_pred)
-            
-            y_train_pred = scaler.inverse_transform(y_train_scaled_pred)
-            
-            # Compute training error:
-            train_errors = mf.rmse(y_train, y_train_pred, axis=1)
-            
-            
-            # Predict test data:
-            y_test_scaled = scaler.transform(y_test)
-            
-            y_test_scaled_pca = pca.transform(y_test_scaled)
-            
-            y_test_scaled_pca_pred = np.zeros_like(y_test_scaled_pca)
-            
-            # Loop for predicting testing data:
-            for i in tqdm(range(len(X_test))):
-                
-                # If True: We need both X_train and X_test
-                if i < ar:
-                    
-                    X_in_arr = []
-                    
-                    # Loop over preceding steps:
-                    for j in range(ar):
-
-                        k = i-ar+j
-                        
-                        # If True: Use X_train
-                        if k < 0:
-                            X_in_arr.append(X_train[k])
-                            
-                        # If False: Use y_test_pred
-                        else:
-                            X_in_arr.append(X_test[k])
-                        
-                # If False: We need only y_test_pred:
-                else:
-                    X_in_arr = [X_test[i-ar+j] for j in range(ar)]
-        
-                X_in = np.concatenate(X_in_arr).reshape(1,-1)
-                
-                    
-                y_test_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-            
-            y_test_scaled_pred = pca.inverse_transform(
-                                   y_test_scaled_pca_pred)
-            
-            y_test_pred = scaler.inverse_transform(y_test_scaled_pred)
-            
-            
-            # Compute test error:
-            test_errors = mf.rmse(y_test, y_test_pred, axis=1)
-
-            # Collect data:
-            model = {"y_train_pred" : y_train_pred,
-                     "y_test_pred"  : y_test_pred,
-                     "train_errors" : train_errors,
-                     "test_errors"  : test_errors,
-                     "name"         : self.name}
-
-            self.model = model
-
-            return
-
-
-## Model 5:    
-    class PCA_Multistep_Regression_Z_BC(PredictionModel):
-        """
-        PCA_Multistep_Regression_Z_BC: 
-        Compresses the state vector into PCA subspace and adds the raw boundary conditions before
-        computing the least squares linear map between the (multiple) previous state [x_(i-1), bc_(i)] and x_(i). 
-        
-        The linear map is used to predict the future state. 
-
-        """
-
-        def __init__(self, pca_bs=256, pca_comps=10, ar=1):
-            
-            self.name = f"PCA-({pca_comps}) Regression with {ar}-previous Z and BCs"
-            self.pca = IncrementalPCA(batch_size=pca_bs,
-                                      n_components=pca_comps)
-            self.pca_bs = pca_bs
-            self.ar = ar            
-            
-        def run(self, df_train, df_test):
-
-            self.df_train = df_train
-            self.df_test  = df_test
-
-            # Extract features:
-            train_feats = extract_features(df_train)
-            test_feats = extract_features(df_test)
-
-            # Extract training data:
-            X_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-            bc_train = np.concatenate([train_feats[i] for i in ["bcn", "bcs"]], axis=1)
-            
-            y_train = np.concatenate([train_feats[i] for i in ["z"]], axis=1)
-            
-            
-            # Extract test data:
-            X_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-            bc_test = np.concatenate([test_feats[i] for i in ["bcn", "bcs"]], axis=1)
-            
-            y_test = np.concatenate([test_feats[i] for i in ["z"]], axis=1)
-
-            # PCA and scaler:
-            scaler = StandardScaler().fit(X_train)
-            pca = self.pca
-            pca_bs = self.pca_bs
-            ar = self.ar
-            
-            # Scale:
-            X_train_scaled = scaler.transform(X_train)
-            y_train_scaled = scaler.transform(y_train)
-            
-            # Fit PCA:
-            for i in tqdm(range(0, len(X_train_scaled), pca_bs)[:-2]):
-                
-                j = i + pca_bs
-                pca.partial_fit(X_train_scaled[i:j])
-            
-            pca.partial_fit(X_train_scaled[j:])
-             
-            # PCA Transform:
-            X_train_scaled_pca = pca.transform(X_train_scaled)
-            y_train_scaled_pca = pca.transform(y_train_scaled)
-            
-            # Create input and output:
-            n_in = len(X_train)
-            
-            X_in_list = []
-            bc_in_list = []
-            
-            for i in range(ar):
-                j = n_in - ar + i
-                X_in_list.append(X_train_scaled_pca[i:j, :])
-                bc_in_list.append(bc_train[i+1:j+1, :])
-            
-            X_in_arr = np.concatenate(X_in_list, axis=1)
-            bc_in_arr = np.concatenate(bc_in_list, axis=1)
-            
-            X_in = np.concatenate([X_in_arr, bc_in_arr], axis=1)
-            
-            y_out = y_train_scaled_pca[ar:, :]
-            
-            # Create linear regressor:
-            LR = LinearRegression()
-            
-            # Fit linear regressor:
-            LR.fit(X_in, y_out)
-            
-            # Predict training data:
-            y_train_scaled_pca_pred = np.zeros_like(X_train_scaled_pca)
-        
-            # Loop for predicting training data:
-            for i in tqdm(range(len(X_train))):
-                
-                # If True: Set the value:
-                if i < ar:
-                    y_train_scaled_pca_pred[i, :] = y_train_scaled_pca[i, :]
-               
-                # If False: Predict the value:
-                else:
-                    
-                    X_in_list = []
-                    bc_in_list = []
-
-                    for j in range(ar):
-                        
-                        k = i-ar+j
-                        
-                        X_in_list.append(y_train_scaled_pca_pred[k, :])
-                        bc_in_list.append(bc_train[k+1, :])
-                    
-                    X_in_arr = np.concatenate(X_in_list)
-                    bc_in_arr = np.concatenate(bc_in_list)
-                    
-                    X_in = np.concatenate([X_in_arr, bc_in_arr]).reshape(1,-1)
-                    y_train_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-
-            y_train_scaled_pred = pca.inverse_transform(
-                                    y_train_scaled_pca_pred)
-            
-            y_train_pred = scaler.inverse_transform(y_train_scaled_pred)
-            
-            # Compute training error:
-            train_errors = mf.rmse(y_train, y_train_pred, axis=1)
-               
-        
-            
-            # Predict test data:
-            X_test_scaled = scaler.transform(X_test)
-            
-            X_test_scaled_pca = pca.transform(X_test_scaled)
-            
-            y_test_scaled_pca_pred = np.zeros_like(X_test_scaled_pca)
-           
-            # Loop for predicting testing data:
-            for i in tqdm(range(len(X_test))):
-                
-                
-                # If True: We need both X_train and X_test
-                if i < ar:
-                                        
-                    X_in_list = []
-                    bc_in_list = []
-                    
-                    # Loop over preceding steps:
-                    for j in range(ar):
-                        
-                        k = i-ar+j
-                        
-                        # If True: Use X_train
-                        if k < 0:
-                            X_in_list.append(X_train_scaled_pca[k])
-                            
-                        # If False: Use y_test_pred
-                        else:
-                            X_in_list.append(y_test_scaled_pca_pred[k])
-                            
-                        k += 1
-                        
-                        # If True: Use bc_train
-                        if k < 0:
-                            bc_in_list.append(bc_train[k])
-                            
-                        # If False: Use bc_test
-                        else:
-                            bc_in_list.append(bc_test[k])
-                        
-                        
-                # If False: We need only y_test_pred:
-                else:
-                    
-                    X_in_list = [y_test_scaled_pca_pred[i-ar+j, :] for j in range(ar)]
-                    bc_in_list = [bc_test[i-ar+j+1, :] for j in range(ar)]
-                
-                
-                X_in_arr = np.concatenate(X_in_list)
-                bc_in_arr = np.concatenate(bc_in_list)
-                
-                X_in = np.concatenate([X_in_arr, bc_in_arr]).reshape(1,-1)
-                
-                y_test_scaled_pca_pred[i, :] = LR.predict(X_in).reshape(-1)
-            
-            y_test_scaled_pred = pca.inverse_transform(
-                                   y_test_scaled_pca_pred)
-            
-            y_test_pred = scaler.inverse_transform(y_test_scaled_pred)
-             
-            
-            # Compute test error:
-            test_errors = mf.rmse(y_test, y_test_pred, axis=1)
-
-            # Collect data:
-            model = {"y_train_pred" : y_train_pred,
-                     "y_test_pred"  : y_test_pred,
-                     "train_errors" : train_errors,
-                     "test_errors"  : test_errors,
-                     "name"         : self.name}
-
-            self.model = model
-
-            return
-
-
-
-        
-        
-        
-#######################################################################################
-#######################################################################################
-#######################################################################################
-#######################################################################################
-#######################################################################################
-#######################################################################################
-
-
-
-
-
-from sklearn import preprocessing, base, decomposition, linear_model
+from copy import copy, deepcopy
 
 import pandas as pd
 import numpy as np
 
 from Scripts import my_functions as mf
+from tqdm import tqdm
 
 
 class Storage:
@@ -966,6 +15,7 @@ class Storage:
     def __init__(self):
         pass
 
+    
     def load_data(dataframe):
         """
         Method for loading data into the Storage class.
@@ -973,18 +23,26 @@ class Storage:
         # Rename:
         df = dataframe
         
-        # Load all data and store in Storage class:
-        Storage.z_data   = df.filter(regex="z_")
-        Storage.u_data   = df.filter(regex="^u_")
-        Storage.v_data   = df.filter(regex="^v_")
-        Storage.bcn_data = df.filter(regex="bcn_")
-        Storage.bcs_data = df.filter(regex="bcs_")
-        Storage.wu_data  = df.filter(regex="wu_")
-        Storage.wv_data  = df.filter(regex="wv_")
+        # Dictionary w/ variables and regexes:
+        my_var_dict = {"z"   : "z_", 
+                       "u"   : "^u_",
+                       "v"   : "^v_",
+                       "bcn" : "bcn_",
+                       "bcs" : "bcs_",
+                       "wu"  : "wu_",
+                       "wv"  : "wv_"}
+        
+        # Create data dictionary:
+        Storage.data = {}
+        
+        # Loop over dictionary items:
+        for key, regex in my_var_dict.items():
+            
+            # Fill data dictionary:
+            Storage.data[key] = df.filter(regex=regex)
         
         Storage.n_samples = len(df)
-    
-    
+  
     def get_active_columns(column_names, state_variables):
         """
         Method for extracting active columns.
@@ -997,11 +55,27 @@ class Storage:
         for var in state_variables:
 
             # (Boolean) addition of active columns for each state variable:
-            active_cols += np.array([True if var in i else False for i in column_names])
+            active_cols += np.array([True if var in i else \
+                                     False for i in column_names])
 
-        return active_cols
-    
-    
+        return active_cols   
+
+    def copy_dict_pd(dict_in, keys=None):
+
+        dict_out = {}
+
+        if dict_in is None:
+            raise AssertionError("Input dictionary is empty.")
+
+        if keys is None:
+            keys = dict_in.keys()
+        
+        for key in keys:
+            cols = dict_in[key].columns
+            dict_out[key] = pd.DataFrame(dict_in[key], columns=cols)
+
+        return dict_out
+
     def get_features(variables):
         """
         Method for extracting and concatenating features.
@@ -1032,13 +106,13 @@ class Storage:
                 feats_list.append(Storage.wv_data)
 
             # Concatenate features column-wise:
-            feats  = pd.concat(feats_list,  axis=1).values
+            feats  = pd.concat(feats_list,  axis=1)
         
         return feats
-    
-    
-    def get_window_features(features, lag=None, lead=None):
+
+    def get_window_features_list(features, lag=None, lead=None):
         
+        # Handling of lag and lead input:
         if (lag==None and lead==None):
             AssertionError("Either lag and/or lead must be positive")
         
@@ -1048,50 +122,47 @@ class Storage:
         if lead == None:
             lead = 0
         
-        # Compute number of samples:
-        n_samples, n_columns = features.shape
-        
-        # Allocate memory:
-        window_df = pd.DataFrame(index=range(n_samples-lag-lead), 
-                                 columns=range(n_columns*(lag+lead)))
-        
-        # Loop over samples:
-        for i in range(n_samples):
-            
-            # Disregard lagged rows outside matrix:
-            if i-lag < 0:
-                pass
-            
-            # Disregard leading rows outside matrix:
-            elif i+lead > n_samples-1:
-                pass
-            
-            else:
+        # List of features:
+        features_list = []
+
+        # Check if lagged features are needed:
+        if lag > 0:
+
+            # Iterate over lag:
+            for i in range(1, lag+1)[::-1]:
+                features_tmp = features.copy()
+                features_tmp.columns = [f"{col}_lag{i}" for col in features_tmp.columns]
+                features_list.append(features_tmp.shift(i))
+
+        # Check if leading features are needed:
+        if lead > 0:
                 
-                window_df.loc[i,:] = np.concatenate([features[k] for k in range(i-lag, i+lead)])
-                
+            # Iterate over lead:
+            for i in range(0, lead):
+                features_tmp = features.copy()
+
+                if i > 0:
+                    features_tmp.columns = [f"{col}_lead{i}" for col in features_tmp.columns]
+                features_list.append(features_tmp.shift(-i))
         
-        return window_df
-                    
-        
+        return features_list
+                         
     def get_regressor(regressor):
         
         match regressor:
             case "linear":
                 reg = linear_model.LinearRegression()
-            case "ridge_10":
-                reg = linear_model.Ridge(alpha=10)
-            case "ridge_2":
-                reg = linear_model.Ridge(alpha=2)
             case "ridge_1":
                 reg = linear_model.Ridge(alpha=1)
-            case "ridge_01":
-                reg = linear_model.Ridge(alpha=0.1)   
+            case "XGBoost":
+                #reg = ensemble.GradientBoostingRegressor(verbose=1)  
+                reg = XGBRegressor()
             case _:
                 raise AssertionError("The chosen regressor was not found")
         
         return reg
     
+
 class MyModels:
 
     def __init__(self, df, scaler, latent_space):
@@ -1112,53 +183,75 @@ class MyModels:
         # Load data into Storage class:
         Storage.load_data(df)
         
+        # Set name of Storage object:
+        name = f""
+
+        # State variables:
+        state_vars = ["z", "u", "v"]
         
-        # Concatenate all state data:
-        state_data = pd.concat([Storage.z_data, 
-                                Storage.u_data, 
-                                Storage.v_data],axis=1)
+        # Find matching scalers:
+        scalers = {}
         
-        # Append column names:
-        Storage.columns = state_data.columns
-        
-        # Extract subset of state data:
-        state_data_fit = state_data[::n_every]
-        
-        
-        # Find matching scaler:
         match scaler:
+            
             case "standard":
-                scaler = preprocessing.StandardScaler()
+                name += "scale: std, "
+                for var in state_vars:
+                    scalers[var] = preprocessing.StandardScaler()
+            
             case _:
-                scaler = None
+                scalers = None
         
         # Find matching latent space:
+        latent_spaces = {}
+        
         match latent_space:
+            
             case "pca":
-                latent_space = decomposition.IncrementalPCA(
-                                    n_components = max_dim,
-                                    batch_size   = bat_size)
+                name += "latent: pca, "
+                for var in state_vars:
+                    latent_spaces[var] = decomposition.IncrementalPCA(
+                                            n_components = max_dim,
+                                            batch_size   = bat_size)
+            
             case _:
-                latent_space = None
+                latent_spaces = None
         
+        # Check if fitting data is needed:
+        if not (scalers is None and latent_spaces is None):
+            
+            # Create fit data:
+            fit_data = {}
+            
+            # Fill fit data:
+            for key in state_vars:
+                fit_data[key] = Storage.data[key][::n_every]
         
-        # Fit scaler:
-        if scaler is not None:
-            state_data_fit = scaler.fit_transform(state_data_fit)
-        
-        # Fit latent space:
-        if latent_space is not None:
-            latent_space.fit(state_data_fit)
-            Storage.max_dim = max_dim
+            # Fit scaler:
+            if scaler is not None:
+
+                for key, obj in scalers.items():
+                    fit_data[key] = obj.fit_transform(fit_data[key])
+
+            # Fit latent space:
+            if latent_spaces is not None:
+
+                for key, obj in latent_spaces.items():
+                    obj.fit(scalers[key].transform(fit_data[key]))
+
+                Storage.max_dim = max_dim
         
         
         # Append scaler and latent space to self object.
-        Storage.scaler = scaler
-        Storage.latent_space = latent_space
+        Storage.scalers = scalers
+        Storage.latent_spaces = latent_spaces
         
+        Storage.name = name
+        Storage.name_set = "init"
+
         print("Init was run.")
-        
-    
+
+
     class Template:
         """
         This is a basic model template.
@@ -1174,6 +267,7 @@ class MyModels:
             """
             raise NotImplementedError("Subclasses must implement the 'fit' method.")
 
+        
         def predict(self, X=None, y=None):
             """
             Placeholder for making predictions.
@@ -1185,252 +279,763 @@ class MyModels:
                 Predicted labels.
             """
             raise NotImplementedError("Subclasses must implement the 'predict' method.")
-
-    
-    
-    class RegressionModel(Template):
-        
-        
-        def __init__(self, regressor=None, inputs=None, outputs=None,
-                     wind_conditions=False, boundary_conditions=False,
-                     state_lag=1, extra_lag=0, extra_lead=1,
-                     latent_dim=None, n_train=None, n_test=None):
+ 
+        def load_data(self):
             
-            ### INPUT CHECKING: ###
-            
-            # Check that a valid regressor was chosen:
-            if regressor is None:
-                raise AssertionError("Regressor is missing.")
-            
-            # Check that valid input exists:
-            if (len(inputs) == 0 and wind_conditions == False and
-                boundary_conditions == False):
-                raise AssertionError("Model input is missing. Choose between state variables, boundary- or wind conditions")
-
-            # Check that valid output exists:
-            if len(outputs) == 0:
-                raise AssertionError("Model target is missing. Choose between state variables.")
-            
-            # Check if lag of state features is reasonable:
-            if state_lag < 1 or state_lag > 10:
-                raise AssertionError("Number of lagged state features is either too low or too high. \
-                                     Should be in interval [1, 10]")
+            # Get input data:
+            if self.input is not None:
                 
+                self.input_data = Storage.data[self.input].copy()
+
+                self.output_data = self.input_data.copy()
+                
+                return self
+        
+        def del_data(self):
             
-            # Check that latent space and dimensions are present simultaneously.
-            if (Storage.latent_space is None and latent_dim is None):
-                raise AssertionError("Mismatch between latent_dim and latent_space.")
+            del self.output_data, self.output_preds, self.input_data
             
-            if Storage.max_dim < latent_dim:
-                raise AssertionError(f"Too many latent dimensions. Should be in interval [1, {Storage.max_dim}]") 
+            return self
+        
+        
+        def scale_n_proj(self, direction, X=None, y=None):
+            """
+            Method for scaling and projecting input and output data.
+
+            Args:
+                direction: "forward" or "inverse".
+                X: Input data (pd.DataFrame).
+                y: Output data (pd.DataFrame).
             
-            # Ensure a reasonable number of training samples:
-            if n_train is None:
-                n_train = Storage.n_samples // 4
+            Returns:
+                X2: Scaled and projected input data. (pd.DataFrame)
+                y2: Scaled and projected output data. (pd.DataFrame)
+
+            """
+
+            # Check if scaling is needed:
+            if self.scalers is not None:
+                scaler = self.scalers[self.input]
             
+            else:
+                scaler = None
+
+            # Check if projection is needed:
+            if self.latent_spaces is not None:
+                latent_space = deepcopy((self.latent_spaces[self.input]))
+
+                latent_space.components_ = latent_space.components_[:self.latent_dim, :]
+
+            else:
+                latent_space = None
+
+            # Check if input data is present:
+            if X is not None:
+                
+                # Copy input data:
+                X2 = X.copy()
+
+                X_index = X2.index
+
+                # Forward method:
+                if direction == "forward":
+
+                    # Get column names from input data:
+                    cols = self.input_data.columns
+
+                    # Check if scaling is needed:
+                    if scaler is not None:
+                        X2 = scaler.transform(X2)
+                        X2 = pd.DataFrame(X2,
+                            columns=cols)
+
+                    # Check if projection is needed:
+                    if latent_space is not None:
+                        X2 = latent_space.transform(X2)
+                        X2 = pd.DataFrame(X2,
+                            columns=cols[:self.latent_dim])
+
+                # Inverse method:
+                if direction == "inverse":
+
+                    # Get column names from stored data:
+                    cols = self.input_data.columns
+
+                    # Check if projection is needed:
+                    if latent_space is not None:
+                        X2 = latent_space.inverse_transform(X2)
+                        X2 = pd.DataFrame(X2,
+                                    columns=cols)
+
+                    # Check if scaling is needed:
+                    if scaler is not None:
+                        X2 = scaler.inverse_transform(X2)
+                        X2 = pd.DataFrame(X2,
+                                    columns=cols)
+
+                # Set index:
+                X2.index = X_index
+
+            else:
+                X2 = None
+
+
+            # Check if output data is present:
+            if y is not None:
+                
+                y2 = y.copy()
+                
+                y_index = y2.index
+
+                # Forward method:
+                if direction == "forward":
+
+                    # Get column names:
+                    cols = self.output_data.columns
+
+                    # Check if scaling is needed:
+                    if scaler is not None:
+                        y2 = scaler.transform(y2)
+                        y2 = pd.DataFrame(y2,
+                                    columns=cols)
+                        
+                    # Check if projection is needed:
+                    if latent_space is not None:
+                        y2 = latent_space.transform(y2)
+                        y2 = pd.DataFrame(y2,
+                                    columns=cols[:self.latent_dim])
+                        
+                        y2 = y2.iloc[:,:self.latent_dim]
+
+                # Inverse method:
+                if direction == "inverse":
+                    
+                    # Get column names from stored data:
+                    cols = self.output_data.columns
+
+                    # Check if projection is needed:
+                    if latent_space is not None:
+                        y2 = latent_space.inverse_transform(y2)
+                        y2 = pd.DataFrame(y2,
+                                    columns=cols)
+
+                    # Check if scaling is needed:
+                    if scaler is not None:
+                        y2 = scaler.inverse_transform(y2)
+                        y2 = pd.DataFrame(y2,
+                                    columns=cols)
+
+                # Set index:
+                y2.index = y_index
+
+            else:
+                y2 = None
+            
+            return X2, y2
+
+
+        def generate_list_pd(self, X=None, y=None):
+            
+            # Check if input data is present:
+            if X is not None:
+                
+                # Copy input data:
+                X_mat = X.copy()
+                
+                # Check if lagged state features are needed:
+                if self.state_lag >= 1:
+
+                    # Return lagged state features as list:
+                    X_mat = Storage.get_window_features_list(X_mat, self.state_lag)
+
+                else:
+                    # Convert dataframe to list:
+                    X_mat = [X_mat]
+            else:
+                X_mat = []
+
+            # Check if extra input data is present:
+            if self.extra_data is not None:
+                
+                # Copy extra input data:
+                extra_mat = self.extra_data.copy() 
+            
+                # Check if lagged extra features are needed:
+                if self.extra_lag >= 1 or self.extra_lead >= 1:
+
+                    # Return lagged extra features as list:
+                    extra_mat = Storage.get_window_features_list(extra_mat, self.extra_lag, self.extra_lead)
+
+                else:
+                    # Convert dataframe to list:
+                    extra_mat = [extra_mat]
+
+            else:
+                extra_mat = []
+
+            # Check if output data is present:
+            if y is not None:
+
+                # Copy output data:
+                y_mat = [y.copy()]
+
+            else:
+
+                y_mat = []
+
+            return X_mat, extra_mat, y_mat
+
+
+        def plot_errors(self, metric):
+
+            pass
+
+
+        def compute_errors(self, n_train=None):
+
+            # Compute error metrics:
+            data = self.output_data
+            pred = self.output_preds
+
+            rmse = mf.rmse(data, pred, axis=0).mean()
+            me = mf.me(data, pred, axis=0).mean()
+            mae = mf.mae(data, pred, axis=0).mean()
+            minae = mf.minae(data, pred, axis=0).min()
+            maxae = mf.maxae(data, pred, axis=0).max()
+
+            error_metrics = pd.DataFrame(
+                [[rmse, me, mae, minae, maxae]],
+                columns=["Mean RMSE", "Mean ME", "Mean MAE", "Min Err", "Max Err"])
+
+            if n_train is not None:
+                data_train = data.iloc[:n_train]
+                pred_train = pred.iloc[:n_train]
+                data_test = data.iloc[n_train:]
+                pred_test = pred.iloc[n_train:]
+            
+                rmse_train = mf.rmse(data_train, pred_train, axis=0).mean()
+                me_train = mf.me(data_train, pred_train, axis=0).mean()
+                mae_train = mf.mae(data_train, pred_train, axis=0).mean()
+                minae_train = mf.minae(data_train, pred_train, axis=0).min()
+                maxae_train = mf.maxae(data_train, pred_train, axis=0).max()
+
+                rmse_test = mf.rmse(data_test, pred_test, axis=0).mean()
+                me_test = mf.me(data_test, pred_test, axis=0).mean()
+                mae_test = mf.mae(data_test, pred_test, axis=0).mean()
+                minae_test = mf.minae(data_test, pred_test, axis=0).min()
+                maxae_test = mf.maxae(data_test, pred_test, axis=0).max()
+
+                error_metrics["Mean Train RMSE"] = rmse_train
+                error_metrics["Mean Train ME"] = me_train
+                error_metrics["Mean Train MAE"] = mae_train
+                error_metrics["Mean Train Min Err"] = minae_train
+                error_metrics["Mean Train Max Err"] = maxae_train
+
+                error_metrics["Mean Test RMSE"] = rmse_test
+                error_metrics["Mean Test ME"] = me_test
+                error_metrics["Mean Test MAE"] = mae_test
+                error_metrics["Mean Test Min Err"] = minae_test
+                error_metrics["Mean Test Max Err"] = maxae_test
+
+            self.error_metrics = error_metrics
+
+            return self
+                
+
+    class BaselineModel(Template):
+        """
+        This is a baseline model that predicts the
+        mean of the training data.
+        """
+
+        def __init__(self, var, model_type):
+            """
+            Args:
+                var: Variable.
+                model_type: Baseline or Coordinate.
+            """
+
+            # Object initialization:
+            self.input = var
+            self.output = var
+            self.model_type = model_type
+            self.model_tested = False
+
+            # Naming scheme:
+            if model_type == "Collective":
+                self.name = "Collective Mean"
+            
+            if model_type == "Coordinate":
+                self.name = "Coordinate Mean"
+
+            # Get input data:
+            if var is not None:
+                self.load_data()
+
+            self.name_set = Storage.name_set
+        
+
+        def fit(self, X=None, y=None, n_train=None):
+            
+            # Check if input data is present:
+            if X is None:
+                X = self.input_data.copy()
+            
+            # Check if output data is present:
+            if y is None:
+                y = self.output_data.copy()
+            
+
             # Check if n_train is a fraction:
-            if n_train > 0 and n_train < 1:
-                n_train = Storage.n_samples * n_train // 1
+            if n_train is not None:
+
+                if n_train > 0 and n_train < 1:   
+                    
+                    # Convert fraction to number of samples:
+                    n_train = int(len(y) * n_train)
+
+                self.n_train = n_train
+
+            # Define training data:
+            y_train = y.iloc[:self.n_train]
+
+            if self.model_type == "Collective":
                 
-            if n_train >= Storage.n_samples - max(state_lag, extra_lag):
-                raise AssertionError("Too many training samples.")
+                # Get mean value:
+                tmp = y_train.mean(axis=0)
+                tmp_mean = tmp.mean()
+                tmp = tmp * 0 + tmp_mean
+                self.mean = tmp
+
+            elif self.model_type == "Coordinate":
+
+                # Get mean value:
+                self.mean = y_train.mean(axis=0)
+
+            return self
+
+
+        def predict(self, X=None, y=None, n_test=None):
                 
+            # Check if input data is present:
+            if X is None:
+                X = self.input_data.copy()
             
-            ### ASSOCIATING INPUTS TO CLASS OBJECT: ###
+            # Check if output data is present:
+            if y is None:
+                y = self.output_data.copy()
             
-            self.inputs = inputs
-            self.outputs = outputs
-            self.wind_conditions = wind_conditions
-            self.boundary_conditions = boundary_conditions
+            # Allocate memory:
+            self.output_preds = y.copy()
+    
+            # Get mean value:
+            mean = self.mean
+
+            if n_test is None:
+
+                # Compute n_test:
+                n_test = int(len(y) - self.n_train)
+
+                self.n_test = n_test
+                
+                preds = self.output_preds.copy()
+
+                # Loop over test range:
+                for i in tqdm(range(len(preds))):
+                    tmp = preds.iloc[i, :].values
+                    tmp2 = tmp * 0 + mean
+                    
+                    preds.iloc[i, :] = tmp2
+                
+                self.output_preds = preds
+
+            # Compute error metrics:
+            self.compute_errors()
+            
+            self.model_tested = True
+            
+            return self
+
+
+    class ReconModel(Template):
+        """
+        This is a reconstruction model that reconstructs the input and output data using scaler and latent space if available.
+        """
+        
+        def __init__(self, var, latent_dim=1):
+            """
+            Args:
+                input: Variable (string).
+                latent_dim: Number of latent dimensions to use.
+            """
+
+            # Object initialization:
+            self.input = var
+            self.output = var
+            self.latent_dim = latent_dim
+            self.model_tested = False
+            
+            # Get input data:
+            if var is not None:
+                self.load_data()
+
+            name = Storage.name
+
+            self.latent_spaces = Storage.latent_spaces
+            self.scalers = Storage.scalers
+
+            if self.latent_spaces is not None:
+                name = name[:-2]
+                name += f"({self.latent_dim})-Recon" 
+
+            # Set dimensions of latent spaces:
+            if latent_dim is not None:
+
+                if latent_dim > Storage.max_dim:
+                    raise AssertionError(f"Too many latent dimensions. Should be in interval [1, {Storage.max_dim}]")
+                
+            self.name = name
+        
+        def fit(self, X=None, y=None, n_train=None):
+
+            return self
+
+
+        def predict(self, X=None, y=None):
+                
+            # Check if input data is present:
+            if X is None:
+                X = self.input_data.copy()
+            
+            # Check if output data is present:
+            if y is None:
+                y = self.output_data.copy()
+            
+            # Scale and project output:
+            _, y1 = self.scale_n_proj("forward", X=None, y=y)
+
+            # Rescale and project output:
+            _, y2 = self.scale_n_proj("inverse", X=None, y=y1)
+
+            # Store output:
+            self.output_preds = y2
+
+            # Compute error metrics:
+            self.compute_errors()
+            
+            self.model_tested = True
+            
+            return self
+        
+
+    class RegressionModel(Template):
+        """
+        This is a regression model that predicts the
+        output variables using the input variables.
+        """
+
+        def __init__(self, regressor=None, var=None,
+                     wind=False, boundary=False,
+                     state_lag=1, extra_lag=0, extra_lead=0,
+                     latent_dim=1):
+           
+           # Object initialization:
+            self.input = var
+            self.output = var
+            self.wind = wind
+            self.boundary = boundary
             self.state_lag = state_lag
             self.extra_lag = extra_lag
             self.extra_lead = extra_lead
             self.latent_dim = latent_dim
-            self.n_train = n_train
-            self.n_test = n_test
+
+            self.scalers = Storage.scalers
+            self.latent_spaces = Storage.latent_spaces
+
+            self.model_tested = False
             
+            # Set dimensions of latent spaces:
+            if latent_dim is not None:
+
+                if latent_dim > Storage.max_dim:
+                    raise AssertionError(f"Too many latent dimensions. Should be in interval [1, {Storage.max_dim}]")
+                
+            # Get regressor:
             self.regressor = Storage.get_regressor(regressor)
+
+            # Get input data:
+            if var is not None:
+                self.load_data()
             
-            ### RENAME: ###
+            # Get extra input data:
+            if (wind or boundary):
+                
+                self.extras = []
+
+                if boundary:
+                    self.extras.extend(["bcn", "bcs"])
+
+                if wind:
+                    self.extras.extend(["wu", "wv"])                
+                
+                extra_data = pd.concat([Storage.data[extra] for extra in self.extras], axis=1)
+                
+            else:
+                extra_data = None
             
-            input_state_vars = inputs
-            output_state_vars = outputs
-            
+            self.extra_data = extra_data
+
+            self.input_cols_dict = None
+            self.output_cols_dict = None
+
+            self.name_set = Storage.name_set
+
+            # Naming scheme:
+            if 1:
+                name = Storage.name
+
+                if self.latent_spaces is not None:
+                    name = name[:-2]
+                    name += f"({self.latent_dim}), "
+
+                if regressor is not None:
+                    name += f"{regressor}("
+                
+                if var is not None:
+                    in_str = ", ".join(var)
+                
+                if extra_lag > 0 or extra_lead > 0:
+
+                    if boundary:
+                        in_str += ", bcn, bcs"
+
+                    if wind:
+                        in_str += ", wu, wv"
+
+                name += f"[{in_str}])->"
+
+                if var is not None:
+                    out_str = ", ".join(var)
+                    name += f"([{out_str}]), "
+                
+                name += f"state_lag: {state_lag}"
+
+                if (boundary or wind):
+
+                    if extra_lag > 0:
+                        name += f", extra_lag: {extra_lag}"
+                    
+                    if extra_lead > 0:
+                        name += f", extra_lead: {extra_lead}"
         
-            ### CONCATENATE STATE INPUT AND OUTPUT: ###
-            
-            # Check if input state variables are needed:
-            if len(input_state_vars) != 0:
-                
-                # Extract input state features:
-                self.input_data = Storage.get_features(input_state_vars)
-                self.state_feats_in  = self.input_data
-            else:
-                self.state_feats_in = None
-            
-            self.output_data = Storage.get_features(output_state_vars)
-            self.state_feats_out = self.output_data
-            
-            
-            ### SCALE AND PROJECT STATE FEATURES: ###
-            
-            scaler       = Storage.scaler
-            latent_space = Storage.latent_space
-            columns      = Storage.columns
-            
-            # Check if input state variables are needed:
-            if len(input_state_vars) > 0:
-                self.active_cols_in = Storage.get_active_columns(columns, input_state_vars)
-                  
-                if scaler is not None:
-                    self.scaler_in = base.clone(scaler)
-                    self.scaler_in.mean_ = scaler.mean_[self.active_cols_in]
-                    self.scaler_in.scale_ = scaler.scale_[self.active_cols_in]
-                    
-                    self.state_feats_in = self.scaler_in.transform(self.state_feats_in)
-                       
-                if (latent_space is not None and latent_dim is not None):
-                    self.latent_space_in = base.clone(latent_space)
-                    self.latent_space_in.mean_ = latent_space.mean_[self.active_cols_in].copy()
-                    self.latent_space_in.components_ = latent_space.components_[:latent_dim,
-                                                                                self.active_cols_in].copy()
-                    
-                    self.state_feats_in = self.latent_space_in.transform(self.state_feats_in)
-                    
-                else:
-                    raise AssertionError("Mismatch between latent_dim and latent_space.")
-            
-            # Check if output state variables are needed:
-            if len(output_state_vars) > 0:
-                
-                self.active_cols_out = Storage.get_active_columns(columns, output_state_vars)
-                
-                if scaler is not None:
-                    self.scaler_out = base.clone(scaler)
-                    self.scaler_out.mean_ = scaler.mean_[self.active_cols_out]
-                    self.scaler_out.scale_ = scaler.scale_[self.active_cols_out]
-                
-                    self.state_feats_out = self.scaler_out.transform(self.state_feats_out)
-                
-                if latent_space is not None:
-                    self.latent_space_out = base.clone(latent_space)
-                    self.latent_space_out.mean_ = latent_space.mean_[self.active_cols_out].copy()
-                    self.latent_space_out.components_ = latent_space.components_[:latent_dim,
-                                                                                self.active_cols_out].copy()
-                    
-                    self.state_feats_out = self.latent_space_out.transform(self.state_feats_out)
-                    
-            
-            ### LAG STATE FEATURES: ###
-            
-            # Check if lagged state features are needed:
-            if len(input_state_vars) != 0 and state_lag >= 1:
-                
-                self.state_feats_in = Storage.get_window_features(self.state_feats_in, state_lag)                    
-                
-                
-            ### CONCATENATE EXTRA INPUT: ###
+                self.name = name
+                self.name_set = "init"
 
-            # Allocate memory for extra input:
-            self.input_extra_vars = []
-
-            # Check if boundary conditions are needed:
-            if boundary_conditions == True:
-                
-                self.input_extra_vars.extend(["bcn", "bcs"])
-                
-            # Check if wind conditions are needed:
-            if wind_conditions == True:
-                
-                self.input_extra_vars.extend(["wu", "wv"])
-
-            # Check if any extra features were added:
-            if len(self.input_extra_vars) != 0:
-
-                # Concatenate features column wise:
-                self.extra_feats_in = Storage.get_features(self.input_extra_vars)
-
-            else:
-                self.extra_feats_in = None
-            
-            
-            ### LAG/LEAD EXTRA INPUT: ###
-            
-            # Check if extra inputs are needed:
-            if self.extra_feats_in is not None:
-                
-                self.extra_feats_in = Storage.get_window_features(self.extra_feats_in, extra_lag, extra_lead)
-                
-            
-            ### FIX INDICES: ###
-            
-            # Concatenate data
-            self.feats_in = pd.concat([self.state_feats_in, self.extra_feats_in], axis=1).dropna()
-            self.feats_out = pd.DataFrame(self.state_feats_out).loc[self.feats_in.index]
-            
             return
-        
+
         
         def fit(self, X=None, y=None, n_train=None):
             
+            # Check if input data is present:
+            if X is None:
+                X = self.input_data.copy()
             
-            if n_train is None:
-                n_train = self.n_train
+            # Check if output data is present:
+            if y is None:
+                y = self.output_data.copy()
+
+            # Scale and project input and output:
+            X1, y1 = self.scale_n_proj("forward", X, y)
+
+            [X_list, extra_X_list, y_list] = self.generate_list_pd(X1, y1)
             
-            if (X is not None and y is None) or (X is None and y is not None):
-                raise AssertionError("Either choose both X and y manually or let the program do it automatically.")
-            
-            if X is None and y is None:
-                X = self.feats_in
-                y = self.feats_out
-            
-            self.X = X
-            self.y = y
-            
-            self.X_train = X.iloc[:n_train, :]
-            self.y_train = y.iloc[:n_train, :]
-            
-            self.regressor.fit(self.X_train, self.y_train)
+            X_df = pd.concat(X_list+extra_X_list, axis=1).dropna()
+            y_df = pd.concat(y_list, axis=1).loc[X_df.index]
+
+            # Check if n_train is a fraction:
+            if n_train is not None:
+
+                if n_train > 0 and n_train < 1:   
+                    
+                    # Convert fraction to number of samples:
+                    n_train = int(len(y_df) * n_train)
+
+                self.n_train = n_train
+
+
+            # Define training data:
+            X_train = X_df.iloc[:self.n_train]
+            y_train = y_df.iloc[:self.n_train]
+
+            # Fit model:
+            self.regressor.fit(X_train, y_train)
             
             return self
+
+
+        def predict(self, X=None, y=None, n_test=None):
             
-        
-        def predict(self, X=None, n_test=None):
-            
-            scaler = Storage.scaler
-            latent_space = Storage.latent_space
-            
-            if n_test is None:
-                n_test = len(self.y)
-            
+            # Check if input data is present:
             if X is None:
-                X = self.X.values
+                X = self.input_data.copy()
             
-            self.y_pred = self.y.copy()*0
+            # Check if output data is present:
+            if y is None:
+                y = self.output_data.copy()
+
+            y_pred = y.copy()
+
+            # Scale and project input and output:
+            X1, y1 = self.scale_n_proj("forward", X, y)
+
+            [X_list, extra_X_list, y_list] = self.generate_list_pd(X1, y1)
             
-            for i in range(n_test):
-                self.y_pred.iloc[i,:] = self.regressor.predict(X[i].reshape(1,-1))
+            combined_df = pd.concat(X_list+extra_X_list, axis=1).dropna()
+
+            if X_list == [] and extra_X_list == []:
+                raise AssertionError("Problems with input data.")
+
+            # Check if input data is present:
+            if X_list != []:
+                X_df = pd.concat(X_list, axis=1).loc[combined_df.index]
+            
+            # Check if extra input data is present:
+            if extra_X_list != []:
+                extra_df = pd.concat(extra_X_list, axis=1).loc[combined_df.index]
+            
+            y_df = pd.concat(y_list, axis=1).loc[X_df.index]
+
+            y_df_pred = y_df.copy()
+            y_df_pred.values[:] = np.NaN
+
+            # Check if n_test is None:
+            if n_test is None:
+                
+                # Set test sample to fraction of data:
+                n_test = int(len(y_df) - self.n_train)
+
+            else:
+
+                # Check if n_test is a fraction:
+                if n_test > 0 and n_test < 1:   
+                    
+                    # Convert fraction to number of samples:
+                    n_test = int(len(y_df) * n_test)
+
+                
+                # Check if the sum of n_train and n_test is larger than the total number of samples:
+                if n_test + self.n_train > len(y_df):
+
+                    raise AssertionError("The sum of n_train and n_test is larger than the total number of samples.")
+
+            self.n_test = n_test
 
             
-            if latent_space is not None:
-                self.y_pred = self.latent_space_out.inverse_transform(self.y_pred)
+            # Define test range:
+            test_range = y_df.index[:self.n_train+self.n_test]
+
+            self.test_range = test_range
+
+            # Allocate memory and ensure correct dataframe shapes:
+            if X_list != []:
+                X_pred_i = pd.DataFrame(X_df.iloc[0].copy()).T
+            else:
+                X_pred_i = None
+
+            if extra_X_list != []:
+                extra_pred_i = pd.DataFrame(extra_df.iloc[0].copy()).T
+            else:
+                extra_pred_i = None
             
-            if scaler is not None:
-                self.y_pred = self.scaler_out.inverse_transform(self.y_pred)
+            y_pred_i = pd.DataFrame(y_df.iloc[0].copy()).T 
+
+
+            # Find columns to replace with predictions:
+            if X_pred_i is not None:
+                
+                # Allocate memory:
+                preds_rep_arr = []
+
+                # Loop over column names of model input:
+                for col_in in X_pred_i:
+                    
+                    # Default to False:
+                    rep_preds = False
+
+                    # Check if lag1 is in column name:
+                    if "lag1" in col_in:
+
+                        # Loop over column names of model output:
+                        for col_out in y_pred_i:
+                            
+                            # Check if input overlaps with output:
+                            if col_out in col_in:
+                                rep_preds=True
+
+                    # Append result to list:
+                    preds_rep_arr.append(rep_preds)
+                
+                preds_rep_arr = np.arange(len(preds_rep_arr))[preds_rep_arr] 
+
+            # Set flag to False:
+            preds_available = False
+
+            # Number of columns to shift by:
+            n_shift = int(len(X_pred_i.columns) / self.state_lag)
+
+            # Loop over test range:
+            for i in tqdm(test_range):
+
+                # Fill input dataframes when predictions are not available:
+                if not preds_available:
+
+                    if X_pred_i is not None:
+                        X_pred_i.values[:] = X_df.loc[i].values
+
+                if extra_pred_i is not None:
+                    extra_pred_i.values[:] = extra_df.loc[i].values
+                
+                # Overwrite with prediction if available:
+                if preds_available:
+                    
+                    if X_pred_i is not None:
+                        
+                        # Shift columns:
+                        X_pred_i = X_pred_i.shift(-n_shift, axis=1)
+
+                        # Replace NaN columns with predictions:
+                        X_pred_i.iloc[:, preds_rep_arr] = y_pred_i.values 
+
+                # Concatenate input dataframes:
+                if X_pred_i is not None and extra_pred_i is not None:
+                    input_pred_i = pd.concat([X_pred_i, extra_pred_i], axis=1)
+
+                elif X_pred_i is not None:
+                    input_pred_i = X_pred_i
+
+                elif extra_pred_i is not None:
+                    input_pred_i = extra_pred_i
+
+                else:
+                    raise AssertionError("Something went wrong.")
+                
+
+                # Make prediction:
+                y_pred_i.values[:] = self.regressor.predict(input_pred_i)
+
+                # Set flag to True:
+                preds_available = True
+
+                # Store prediction:
+                y_df_pred.loc[i,:] = y_pred_i.values
+
+            # Rescale and project output:           
+            _, self.output_preds = self.scale_n_proj("inverse", y=y_df_pred)
             
-            self.y_id = self.feats_out.index
+            # Compute error metrics:
+            self.compute_errors()
             
-            self.y_pred = pd.DataFrame(self.y_pred,
-                                       index=self.y_id)
+            self.model_tested = True
             
-            self.y_true = pd.DataFrame(self.output_data).loc[self.y_id]
-            
-            self.rmse = mf.rmse(self.y_true, self.y_pred, axis=1)
-            self.mae = mf.mae(self.y_true, self.y_pred, axis=1)
-            self.mape = mf.mape(self.y_true, self.y_pred, axis=1)
-            
-            
-            
- 
-            
-         
+            return self
+
